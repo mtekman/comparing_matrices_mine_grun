@@ -1,0 +1,1204 @@
+
+
+* Comparing my counts with MPIs:
+** Inputs:
+   - My counts from the final output of WD set of 8 batches
+     - This is filtered to just the first batch, to match Grün's input
+   - MPIs counts which emulates Grün's perl matrix generation filtering principles on WD batch 1
+     - The reason why the actual perl script was not used is because the cell barcode headers are not preserved making it difficult to compare my matrix with his.
+** Script:
+
+#+BEGIN_SRC R :results output graphics :file plot1.png
+library(ggplot2)
+library(reshape2)
+
+dom_mat <- read.csv('inputs/output.all.matrix_simple.tsv', sep='\t', header=T, row.names=1)
+min_mat <- read.csv('inputs/Galaxy7-[Cross-contamination_Filter_on_data_2_and_data_5__Filtered_Table].tabular', sep='\t', header=T, row.names=1)
+
+rbind(dim(min_mat), dim(dom_mat))
+cbind(min_mat[1:3,1:3], dom_mat[1:3,1:3])
+
+colnames(dom_mat) <-  sub("(*)", "P1_B1_\\1", colnames(dom_mat))
+smin_mat <- min_mat[,grepl("P1_B1_", colnames(min_mat))]
+sdom_mat <- dom_mat[,colnames(dom_mat) %in% colnames(smin_mat)]
+
+#common_names <- rownames(smin_mat) %in% rownames(sdom_mat)
+#message("Common names: ", length(common_names))
+
+#scmine <- smin_mat[common_names,]
+#scgrun <- sdom_mat[common_names,]
+#message("Dim mine, gruns:")
+#dim(scmine)
+#dim(scgrun)
+
+tab_grun <- melt(as.matrix(sdom_mat), varnames= c("Genes", "Cells"), value.name = "Grun")
+tab_mine <- melt(as.matrix(smin_mat), varnames= c("Genes", "Cells"), value.name = "Mine")
+cbind(tab_grun[1:3,1:3], tab_mine[1:3,1:3])
+
+joined <- merge(tab_mine, tab_grun, by = c("Genes", "Cells"))
+head(joined, 3)
+
+#pdf("ggcompareFull.lim50.pdf")
+ggplot(joined, aes(x=Mine,y=Grun)) + geom_point(alpha=0.2) + xlim(0,50) + ylim(0,50)
+#dev.off()
+
+#+END_SRC
+
+#+RESULTS:
+[[file:plot1.png]]
+
+* Why the high counts for Grün and zero for me?
+
+I need to find the specific readnames of Grün's matrix which means modifying the GeneralUtils.py on the biu cluster.
+
+** DONE Update GeneralUtils to give a detailed matrix of readnames.
+** Generate scripts to:
+*** DONE Generate TSV files:
+- [X] Grun
+
+Prepend "P1_B1" to barcodes in this file, and remove all non-numeric values → tsv
+#+BEGIN_SRC python :results output :file inputs/grun.tsv
+def header2barcode(header):
+    return("".join(
+        ["".join(y) for y in list(zip(*[list(x) for x in header.splitlines()]))]
+    ).split())
+
+prepend = "P1_B1_"
+
+with open('./inputs/output.all.matrix_simple','r') as mat:
+    found_geneID = False
+    headers = ""
+    dlen = 0
+    
+    for line in mat:
+        if not(found_geneID):
+            if line.startswith("%30s" % "GENEID"):
+                found_geneID = True
+                print('\t' + '\t'.join([(prepend + x) for x in header2barcode(headers)]))
+            else:
+                headers += line
+            continue
+
+        tokes = line.split()
+        gname = tokes[0]
+        cdata = ["0" if x=="-" else ("%d" % int(x)) for x in tokes[1:]]
+
+        if dlen == 0:
+            dlen = len(cdata)
+        elif dlen != len(cdata):
+            print("Dlen mismatch", dlen, len(cdata), gname, file=sys.stderr)
+            exit(-1)
+
+        print(gname + '\t' + '\t'.join(cdata))
+
+#+END_SRC
+
+#+RESULTS:
+[[file:inputs/grun.tsv]]
+
+- [ ] Mine
+#+BEGIN_SRC R :results output :file inputs/mine.tsv
+tab <- read.csv('inputs/Galaxy7-[Cross-contamination_Filter_on_data_2_and_data_5__Filtered_Table].tabular', sep='\t', header=T, row.names=1, stringsAsFactors=FALSE)
+tsub <- tab[,grepl("P1_B1_", colnames(tab))]
+
+write.table(tsub, file="/dev/stdout", quote=F, sep='\t', col.names=NA)
+#+END_SRC
+
+#+RESULTS:
+[[file:inputs/mine.tsv]]
+
+*** DONE Compare two TSV matrices and generate a joined table of counts
+
+#+BEGIN_SRC bash
+mkdir -p 1_merged
+#+END_SRC
+
+#+RESULTS:
+
+#+BEGIN_SRC R :results output table
+library(reshape2)
+
+dom_mat <- read.csv('inputs/grun.tsv', sep='\t', header=T, row.names=1)
+min_mat <- read.csv('inputs/mine.tsv', sep='\t', header=T, row.names=1)
+
+tab_grun <- melt(as.matrix(dom_mat), varnames= c("Genes", "Cells"), value.name = "Grun")
+tab_mine <- melt(as.matrix(min_mat), varnames= c("Genes", "Cells"), value.name = "Mine")
+
+joined <- merge(tab_mine, tab_grun, by = c("Genes", "Cells"))
+head(joined)
+saveRDS(joined, '1_merged/joined_mine_grun.rds')
+#+END_SRC
+
+#+RESULTS:
+:                Genes        Cells Mine Grun
+: 1 ENSDARG00000000002 P1_B1_AACCTC    0    0
+: 2 ENSDARG00000000002 P1_B1_AACGAG    0    0
+: 3 ENSDARG00000000002 P1_B1_AAGCCA    0    0
+: 4 ENSDARG00000000002 P1_B1_ACAAGC    0    0
+: 5 ENSDARG00000000002 P1_B1_ACAGAC    0    0
+: 6 ENSDARG00000000002 P1_B1_ACAGGA    0    0
+
+**** Find the most significant Gene/Cell combos where Grün is high and mine are low
+
+#+BEGIN_SRC R :results output
+  joined <- readRDS('1_merged/joined_mine_grun.rds')
+  better.grun <- joined[order(joined$Mine - joined$Grun),]
+  better.mine <- joined[order(joined$Grun - joined$Mine),]
+  head(better.grun, 10)
+  head(better.mine, 10)
+#+END_SRC
+
+****** most-diff-genes
+
+     #+RESULTS:
+     #+begin_example
+                          Genes        Cells Mine Grun
+     783541  ENSDARG00000058327 P1_B1_TGAGGA    0  134
+     783514  ENSDARG00000058327 P1_B1_GACGAA    0  102
+     83701   ENSDARG00000006786 P1_B1_TGAGGA    2   89
+     520309  ENSDARG00000038995 P1_B1_TGAGGA    1   87
+     520282  ENSDARG00000038995 P1_B1_GACGAA    0   76
+     783461  ENSDARG00000058327 P1_B1_ACAGAC    0   75
+     783472  ENSDARG00000058327 P1_B1_ACTCTG    2   77
+     729712  ENSDARG00000055839 P1_B1_ACTCTG    0   68
+     1267765 ENSDARG00000090943 P1_B1_TGAGGA    0   68
+     1267696 ENSDARG00000090943 P1_B1_ACTCTG    0   67
+                         Genes        Cells Mine Grun
+     644077 ENSDARG00000045639 P1_B1_ACGTTG  116   44
+     644097 ENSDARG00000045639 P1_B1_CACTCA   90   18
+     644118 ENSDARG00000045639 P1_B1_GAATCC   84   18
+     644133 ENSDARG00000045639 P1_B1_GTACTC   86   21
+     644136 ENSDARG00000045639 P1_B1_GTGACA   66   19
+     644104 ENSDARG00000045639 P1_B1_CGATGA   57   17
+     644072 ENSDARG00000045639 P1_B1_ACCAAC   51   13
+     191656 ENSDARG00000014201 P1_B1_CGATGA   94   57
+     613210 ENSDARG00000044093 P1_B1_GACGAA   40    3
+     644160 ENSDARG00000045639 P1_B1_TTGTGC   41    8
+     #+end_example
+
+*** DONE Where counts signficantly differ, extract umis+readnames from a given cell/gene :code:search:
+
+#+BEGIN_SRC bash
+mkdir -p 2_search_detailed
+#+END_SRC
+
+#+RESULTS:
+
+ 1. First, change the super detailed matrix into a tsv with parseable headers
+
+#+BEGIN_SRC python :results output :file 2_search_detailed/grun.detailed.tsv
+def header2barcode(header):
+    return("".join(
+        ["".join(y) for y in list(zip(*[list(x) for x in header.splitlines()]))]
+    ).split())
+
+prepend = "P1_B1_"
+
+with open('./inputs/logs/output.all.matrix_detailed_super','r') as mat:
+    found_geneID = False
+    headers = ""
+    dlen = 0
+    
+    for line in mat:
+        if not(found_geneID):
+            if line.startswith("%30s" % "GENEID"):
+                found_geneID = True
+                print('\t' + '\t'.join([(prepend + x) for x in header2barcode(headers)]))
+            else:
+                headers += line
+            continue
+
+        tokes = line.split()
+        gname = tokes[0]
+        cdata = ["NA" if x=="-" else x for x in tokes[1:]]
+
+        if dlen == 0:
+            dlen = len(cdata)
+        elif dlen != len(cdata):
+            print("Dlen mismatch", dlen, len(cdata), gname, file=sys.stderr)
+            exit(-1)
+
+        print(gname + '\t' + '\t'.join(cdata))
+
+#+END_SRC
+
+#+RESULTS:
+[[file:2_search_detailed/grun.detailed.tsv]]
+
+<<extract-reads-for-gene-cell>>
+#+BEGIN_SRC R :results value :file 2_search_detailed/top.ENSDARG00000045639.P1_B1_ACGTTG.txt
+tab <- read.table('2_search_detailed/grun.detailed.tsv', row.names = 1, header=T, stringsAsFactors=FALSE)
+
+umi.reads <- unlist(strsplit(tab["ENSDARG00000045639","P1_B1_ACGTTG"], "\\|"))
+
+tab2 <- c()
+res <- lapply(umi.reads, FUN=function(x){
+   umi <- sub("([ACGT]+)_.*","\\1", x)
+   replacer <- paste(umi, "_", sep="")
+   reads <- gsub(replacer,"", x)
+   tab2 <<- rbind(tab2, c(umi,reads))
+})
+
+tab2
+#+END_SRC
+
+#+RESULTS:
+[[file:2_search_detailed/top.ENSDARG00000045639.P1_B1_ACGTTG.txt]]
+
+*** DONE For a list of readnames, pull them from two different SAM/BAM files and compare them
+    
+First flatten our data from umi1 → read1;read2, to umi1→read1, umi1→read2
+
+<<flatten-gene-cell>>
+#+BEGIN_SRC R :results output tabular
+  options(stringsAsFactors = FALSE)
+
+  wanted <- read.table('2_search_detailed/top.ENSDARG00000045639.P1_B1_ACGTTG.txt', col.names=c("umis","reads"))
+
+  crows <- c()
+  res <- sapply(1:nrow(wanted), FUN=function(x){
+      umis=wanted$umis[[x]]
+      read=unlist(strsplit(wanted$reads[[x]], ";"))
+      crows <<- rbind(crows, cbind(umis, read))
+  })
+  wanted <- data.frame(crows)
+  saveRDS(wanted, file="2_search_detailed/top.ENSDARG00000045639.P1_B1_ACGTTG.rds")
+  wanted
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+      umis                                   read
+1   ACGGTG J00182:75:HTKJNBBXX:2:1217:12114:40280
+2   AGACTG J00182:75:HTKJNBBXX:2:2125:13047:12603
+3   AGGTCT J00182:75:HTKJNBBXX:2:1128:17777:39119
+4   AGGTCT J00182:75:HTKJNBBXX:2:2103:19674:17544
+5   AGGTCT J00182:75:HTKJNBBXX:2:2124:11332:40895
+6   AGAAGG J00182:75:HTKJNBBXX:2:1221:15108:48772
+7   AGAAGG J00182:75:HTKJNBBXX:2:1125:10439:47823
+8   CATTCA  J00182:75:HTKJNBBXX:2:1212:13900:3459
+9   TTTGTT J00182:75:HTKJNBBXX:2:1115:24931:46240
+10  TTTGTT J00182:75:HTKJNBBXX:2:2202:28605:34319
+11  GAAGTA J00182:75:HTKJNBBXX:2:1101:28118:14097
+12  GAAGTA  J00182:75:HTKJNBBXX:2:1212:13464:8049
+13  CGGAGG  J00182:75:HTKJNBBXX:2:1101:18355:2668
+14  CGGAGG J00182:75:HTKJNBBXX:2:1219:17634:37079
+15  CGGAGG J00182:75:HTKJNBBXX:2:2107:12094:28323
+16  CGGAGG J00182:75:HTKJNBBXX:2:2119:22201:11196
+17  CGGAGG J00182:75:HTKJNBBXX:2:2126:10805:46205
+18  CGGAGG  J00182:75:HTKJNBBXX:2:2215:17929:7767
+19  CGGAGG J00182:75:HTKJNBBXX:2:2215:10724:26617
+20  CATCAT J00182:75:HTKJNBBXX:2:1111:30655:48772
+21  CATCAT J00182:75:HTKJNBBXX:2:1119:28686:43357
+22  CATCAT J00182:75:HTKJNBBXX:2:1120:25276:27180
+23  CATCAT  J00182:75:HTKJNBBXX:2:1213:22323:2228
+24  CATCAT  J00182:75:HTKJNBBXX:2:2124:3995:17526
+25  CGGTGC J00182:75:HTKJNBBXX:2:2114:16741:36306
+26  TGGGGG J00182:75:HTKJNBBXX:2:2223:22678:14308
+27  GTAGTA J00182:75:HTKJNBBXX:2:1215:11261:11442
+28  TGTAGG J00182:75:HTKJNBBXX:2:1223:22577:39981
+29  TGTAGG J00182:75:HTKJNBBXX:2:2219:17401:41809
+30  TAGGGC  J00182:75:HTKJNBBXX:2:1204:9485:25210
+31  TAGGGC J00182:75:HTKJNBBXX:2:2117:19278:25544
+32  TAGGGC  J00182:75:HTKJNBBXX:2:2126:8268:12093
+33  TAGGGC  J00182:75:HTKJNBBXX:2:2127:2899:10633
+34  AACCAG  J00182:75:HTKJNBBXX:2:1112:9790:36921
+35  AACCAG  J00182:75:HTKJNBBXX:2:1119:19745:8910
+36  AACCAG J00182:75:HTKJNBBXX:2:1201:18497:26934
+37  AACCAG   J00182:75:HTKJNBBXX:2:1208:5528:6255
+38  AACCAG  J00182:75:HTKJNBBXX:2:1215:4543:26072
+39  AACCAG J00182:75:HTKJNBBXX:2:2107:20517:12532
+40  AACCAG  J00182:75:HTKJNBBXX:2:2108:4533:29325
+41  AACCAG  J00182:75:HTKJNBBXX:2:2202:1925:22801
+42  AGCACT J00182:75:HTKJNBBXX:2:1125:30553:19478
+43  AGCACT J00182:75:HTKJNBBXX:2:1128:17980:32894
+44  AGCACT J00182:75:HTKJNBBXX:2:1128:29143:39928
+45  AGCACT  J00182:75:HTKJNBBXX:2:1202:3772:39154
+46  AGCACT  J00182:75:HTKJNBBXX:2:1224:7821:14695
+47  AGCACT J00182:75:HTKJNBBXX:2:2128:18913:35778
+48  AGCACT J00182:75:HTKJNBBXX:2:2209:19136:33000
+49  AGACTC  J00182:75:HTKJNBBXX:2:1217:4929:33070
+50  GGGGGC J00182:75:HTKJNBBXX:2:1101:24261:29782
+51  GGGGGC J00182:75:HTKJNBBXX:2:1112:12012:30398
+52  ATGGAT J00182:75:HTKJNBBXX:2:2113:19735:16981
+53  AGAAGT  J00182:75:HTKJNBBXX:2:1209:18162:8734
+54  TACGTG  J00182:75:HTKJNBBXX:2:1126:3701:24226
+55  TACGTG  J00182:75:HTKJNBBXX:2:1207:30137:6027
+56  TACGTG  J00182:75:HTKJNBBXX:2:2105:2980:36270
+57  TACGTG J00182:75:HTKJNBBXX:2:2118:14681:17544
+58  TACGTG  J00182:75:HTKJNBBXX:2:2202:31050:4444
+59  TACGTG J00182:75:HTKJNBBXX:2:2227:12479:10598
+60  TACGTG J00182:75:HTKJNBBXX:2:2228:24302:47471
+61  TTGTCG  J00182:75:HTKJNBBXX:2:2118:5294:37009
+62  TTGTCG J00182:75:HTKJNBBXX:2:2209:15463:31523
+63  TTGTCG J00182:75:HTKJNBBXX:2:2209:15077:34301
+64  TTGTCG  J00182:75:HTKJNBBXX:2:2220:9557:10950
+65  GGACGC   J00182:75:HTKJNBBXX:2:1114:7841:7029
+66  GGACGC   J00182:75:HTKJNBBXX:2:2118:8044:2598
+67  GGACGC J00182:75:HTKJNBBXX:2:1223:12378:17667
+68  GGACGC J00182:75:HTKJNBBXX:2:2226:19827:17245
+69  GGGAGG  J00182:75:HTKJNBBXX:2:1111:5091:40350
+70  GGGAGG J00182:75:HTKJNBBXX:2:2221:13321:30239
+71  CAGTAA  J00182:75:HTKJNBBXX:2:2228:7608:29413
+72  CTTTGA J00182:75:HTKJNBBXX:2:1110:27448:26758
+73  CTTTGA  J00182:75:HTKJNBBXX:2:1222:8471:42231
+74  CTTTGA   J00182:75:HTKJNBBXX:2:1224:6400:2985
+75  CTTTGA J00182:75:HTKJNBBXX:2:2110:26372:30696
+76  CTTTGA J00182:75:HTKJNBBXX:2:2211:19969:42319
+77  AGAGAT J00182:75:HTKJNBBXX:2:2104:19806:43093
+78  AGAGAT  J00182:75:HTKJNBBXX:2:2116:27306:7838
+79  GTCATC J00182:75:HTKJNBBXX:2:1105:21542:32138
+80  GTCATC J00182:75:HTKJNBBXX:2:1115:11251:23557
+81  GTCATC  J00182:75:HTKJNBBXX:2:1115:6126:33000
+82  GTCATC   J00182:75:HTKJNBBXX:2:1119:6542:3090
+83  GTCATC J00182:75:HTKJNBBXX:2:2105:23348:18142
+84  GTCATC  J00182:75:HTKJNBBXX:2:2115:11434:2141
+85  GTCATC J00182:75:HTKJNBBXX:2:2118:28818:37677
+86  GTCATC J00182:75:HTKJNBBXX:2:2121:17381:23733
+87  GTCATC   J00182:75:HTKJNBBXX:2:2212:8237:3354
+88  GTCATC  J00182:75:HTKJNBBXX:2:2215:4401:24595
+89  GTCATC J00182:75:HTKJNBBXX:2:2216:20364:14555
+90  GTCATC J00182:75:HTKJNBBXX:2:2216:19796:21447
+91  GTCATC J00182:75:HTKJNBBXX:2:2226:20811:39945
+92  GTCATC J00182:75:HTKJNBBXX:2:1207:25723:21940
+93  CTATCA J00182:75:HTKJNBBXX:2:2117:27762:28956
+94  GTGTTG  J00182:75:HTKJNBBXX:2:2216:25408:7117
+95  GCGCTA J00182:75:HTKJNBBXX:2:1109:12865:38029
+96  GCGCTA J00182:75:HTKJNBBXX:2:1109:13129:39225
+97  GCGCTA J00182:75:HTKJNBBXX:2:1123:20476:47278
+98  GCGCTA J00182:75:HTKJNBBXX:2:1124:19319:20234
+99  GCGCTA  J00182:75:HTKJNBBXX:2:1201:3650:42319
+100 GCGCTA  J00182:75:HTKJNBBXX:2:2219:7984:28727
+101 GCGCTA J00182:75:HTKJNBBXX:2:2225:26281:31136
+102 TGACCT J00182:75:HTKJNBBXX:2:2109:26068:12163
+103 TGTGAC J00182:75:HTKJNBBXX:2:2107:11282:11161
+104 TGCTTA  J00182:75:HTKJNBBXX:2:1116:3407:24349
+105 TGCTTA J00182:75:HTKJNBBXX:2:1215:10105:48931
+106 TGCTTA J00182:75:HTKJNBBXX:2:2110:26210:13816
+107 GGGGTA J00182:75:HTKJNBBXX:2:1207:17046:34266
+108 GGGGTA J00182:75:HTKJNBBXX:2:1228:22942:30626
+109 GGGGTA  J00182:75:HTKJNBBXX:2:2101:17036:9244
+110 CATCGT J00182:75:HTKJNBBXX:2:1125:27032:17737
+111 CATCGT J00182:75:HTKJNBBXX:2:1210:20050:28885
+112 ACGTTT J00182:75:HTKJNBBXX:2:2119:20517:43867
+113 ACTCGC J00182:75:HTKJNBBXX:2:1122:20334:13658
+114 TTTTAC J00182:75:HTKJNBBXX:2:1102:23551:18880
+115 TTTTAC J00182:75:HTKJNBBXX:2:1108:14113:47014
+116 TTTTAC J00182:75:HTKJNBBXX:2:1114:28838:13588
+117 TTTTAC J00182:75:HTKJNBBXX:2:1216:29924:30099
+118 TTTTAC J00182:75:HTKJNBBXX:2:1223:28666:20146
+119 TTTTAC J00182:75:HTKJNBBXX:2:2107:19025:16629
+120 TTTTAC  J00182:75:HTKJNBBXX:2:2111:5700:19671
+121 TTTTAC J00182:75:HTKJNBBXX:2:2117:16447:14449
+122 TTTTAC J00182:75:HTKJNBBXX:2:2221:24129:13728
+123 TTTTAC  J00182:75:HTKJNBBXX:2:2228:15108:1930
+124 TTTTAC  J00182:75:HTKJNBBXX:2:2227:23835:3407
+125 GCAGGC  J00182:75:HTKJNBBXX:2:2103:9831:41598
+126 GCAGGC  J00182:75:HTKJNBBXX:2:2122:10916:6132
+127 AGGGTC J00182:75:HTKJNBBXX:2:2113:15990:11759
+128 AGGGTC J00182:75:HTKJNBBXX:2:2112:12713:47120
+129 AGGGTC J00182:75:HTKJNBBXX:2:2115:25926:46698
+130 TCCATA J00182:75:HTKJNBBXX:2:1227:25134:37167
+131 TCCATA J00182:75:HTKJNBBXX:2:2104:13037:44447
+132 TCCATA   J00182:75:HTKJNBBXX:2:2209:6086:4127
+133 GCGCCA  J00182:75:HTKJNBBXX:2:1117:13951:9772
+134 GCGCCA   J00182:75:HTKJNBBXX:2:1208:7090:6607
+135 GCGCCA  J00182:75:HTKJNBBXX:2:2123:30289:5763
+136 GCGCCA J00182:75:HTKJNBBXX:2:2204:11698:41598
+137 GTAGTT J00182:75:HTKJNBBXX:2:1112:29975:12005
+138 GTAGTT  J00182:75:HTKJNBBXX:2:1210:13119:7802
+139 GTAGTT  J00182:75:HTKJNBBXX:2:1210:13342:7873
+140 GTAGTT  J00182:75:HTKJNBBXX:2:2117:6847:21131
+#+end_example
+
+Now perform the actual search and convert to our desired output
+
+**** Search
+
+   - [X] Grun
+  
+   #+BEGIN_SRC R :results output
+     require(Rsamtools)
+     wanted <- readRDS("2_search_detailed/top.ENSDARG00000045639.P1_B1_ACGTTG.rds")
+     bam <- scanBam(
+         'BAM_inputs/grun.wd1.bam',
+         param=ScanBamParam(
+             what=c("qname","rname", "strand", "pos", "flag"),
+             tag=c("NM", "XA")
+         )
+     )[[1]]
+
+     filt <- bam$qname %in% wanted$read
+
+     bam.grun.filtered <- data.frame(
+         qname=bam$qname[filt],
+         rname=bam$rname[filt],
+         strand=bam$strand[filt],
+         pos = bam$pos[filt],
+         flag = bam$flag[filt],
+         NM = bam$tag$NM[filt],
+         XA = bam$tag$XA[filt]
+     )
+
+     saveRDS(bam.grun.filtered, "2_search_detailed/top.ENSDARG00000045639.P1_B1_ACGTTG.GRUNBAM.rds")
+     head(bam.grun.filtered)
+   #+END_SRC
+
+   #+RESULTS:
+   #+begin_example
+                                      qname              rname strand  pos flag NM
+   1 J00182:75:HTKJNBBXX:2:1223:22577:39981 ENSDARG00000045639      + 2949    0  1
+   2 J00182:75:HTKJNBBXX:2:1207:17046:34266 ENSDARG00000045639      + 2911    0  0
+   3 J00182:75:HTKJNBBXX:2:1228:22942:30626 ENSDARG00000045639      + 2917    0  1
+   4  J00182:75:HTKJNBBXX:2:2101:17036:9244 ENSDARG00000045639      + 2910    0  1
+   5  J00182:75:HTKJNBBXX:2:1204:9485:25210 ENSDARG00000045639      + 3414    0  0
+   6 J00182:75:HTKJNBBXX:2:2117:19278:25544 ENSDARG00000045639      + 3421    0  0
+   #+end_example
+
+   - [X] Mine
+
+   The workflow I was looking at was "CelSeq2: New Super Workflow #Run8" where I downloaded the BAM from 55:featureCounts on collection for WD_DP_P1_1.fastq. 
+
+   #+BEGIN_SRC R :results output
+     require(Rsamtools)
+     wanted <- readRDS("2_search_detailed/top.ENSDARG00000045639.P1_B1_ACGTTG.rds")
+     bam <- scanBam(
+         'BAM_inputs/mine.featcount.wd1.bam',
+         param=ScanBamParam(
+             what=c("qname","rname", "strand", "pos", "flag"),
+             tag=c("NH", "HI", "nM", "XS", "XN", "XT")
+         )
+     )[[1]]
+
+     ## The umis and barcodes are in the header, so I need to strip these out
+     bam$aqname <- sub("(.*)_([A-Z]+)_([A-Z]+)", "\\1", bam$qname)
+     bam$barcode <- sub("(.*)_([A-Z]+)_([A-Z]+)", "\\2", bam$qname)
+     bam$umi <- sub("(.*)_([A-Z]+)_([A-Z]+)", "\\3", bam$qname)
+
+     filt <- bam$aqname %in% wanted$read
+
+     bam.mine.filtered <- data.frame(
+         qname=bam$aqname[filt],
+         rname=bam$rname[filt],
+         barcode=bam$barcode[filt],
+         umi=bam$umi[filt],
+         strand=bam$strand[filt],
+         pos = bam$pos[filt],
+         flag = bam$flag[filt],
+         NH = bam$tag$NH[filt],
+         HI = bam$tag$HI[filt],
+         NM = bam$tag$nM[filt],
+         XS = bam$tag$XS[filt],
+         XN = bam$tag$XN[filt],
+         XT = bam$tag$XT[filt]
+     )
+
+     saveRDS(bam.mine.filtered, "2_search_detailed/top.ENSDARG00000045639.P1_B1_ACGTTG.MINEBAM.rds")
+     head(bam.mine.filtered)
+   #+END_SRC
+
+   #+RESULTS:
+   #+begin_example
+                                      qname rname barcode    umi strand      pos flag NH HI NM       XS XN                 XT
+   1  J00182:75:HTKJNBBXX:2:1222:8471:42231  chr8  ACGTTG CTTTGA      + 16018636    0  1  1  0 Assigned  1 ENSDARG00000045639
+   2   J00182:75:HTKJNBBXX:2:1224:6400:2985  chr8  ACGTTG CTTTGA      + 16018637    0  1  1  1 Assigned  1 ENSDARG00000045639
+   3 J00182:75:HTKJNBBXX:2:1110:27448:26758  chr8  ACGTTG CTTTGA      + 16040800    0  1  1  0 Assigned  1 ENSDARG00000045639
+   4 J00182:75:HTKJNBBXX:2:2110:26372:30696  chr8  ACGTTG CTTTGA      + 16040800    0  1  1  0 Assigned  1 ENSDARG00000045639
+   5 J00182:75:HTKJNBBXX:2:2211:19969:42319  chr8  ACGTTG CTTTGA      + 16040800    0  1  1  0 Assigned  1 ENSDARG00000045639
+   6 J00182:75:HTKJNBBXX:2:2227:12479:10598  chr8  ACGTTG TACGTG      + 16076303    0  1  1  0 Assigned  1 ENSDARG00000045639
+   #+end_example
+
+*** DONE Now let us perform a cautious merge and see why my 140 reads for ACGTTG are not being counted
+
+#+BEGIN_SRC R :results output verbatim
+  options(stringsAsFactors = FALSE)
+  reads.mine <- apply(readRDS('2_search_detailed/top.ENSDARG00000045639.P1_B1_ACGTTG.GRUNBAM.rds'), 2, as.character)
+  reads.grun <- apply(readRDS('2_search_detailed/top.ENSDARG00000045639.P1_B1_ACGTTG.MINEBAM.rds'), 2, as.character)
+
+  joined <- merge(x=reads.mine, y=reads.grun, by=c("qname"))
+
+  cat("Total merge length? ", nrow(joined), "\n")
+  cat("Agreement on Genename? ", nrow(joined[joined$rname.x == joined$XT,]), "\n")
+  cat("Barcode is ACGTTG in mine? ", nrow(joined[joined$barcode == "ACGTTG",]), "\n")
+  cat("NM > 2 in mine? ", nrow(joined[as.integer(joined$NM.x) < 2,]), "\n")
+  cat("NM > 2 in grun? ", nrow(joined[as.integer(joined$NM.y) < 2,]), "\n")
+  cat("flag.mine == 0 ?", nrow(joined[as.integer(joined$flag.x) == 0,]), "\n")
+  ##
+  cat("Main differences between Mine and Grun's ?", "\n")
+  joined[
+   (joined$flag.x != joined$flag.y) |
+   (joined$strand.x != joined$strand.y) |
+   (joined$barcode != "ACGTTG") |
+   ((joined$NM.x > 2) & (joined$NM.y <= 2)) |
+   ((joined$NM.y > 2) & (joined$NM.x <= 2)) |
+   (joined$NH != 1)
+  ,]
+  cat("Would I count these under NM <= 2 & HI==1 & flag==[0,16] ? ", nrow(
+  joined[
+      as.integer(joined$NM.x) <=2 |
+      as.integer(joined$flag.x) == 0 |
+      as.integer(joined$flag.x) == 16
+  ,]), "\n")
+ 
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+Total merge length?  140 
+Agreement on Genename?  140 
+Barcode is ACGTTG in mine?  140 
+NM > 2 in mine?  102 
+NM > 2 in grun?  134 
+flag.mine == 0 ? 140 
+Main differences between Mine and Grun's ? 
+ [1] qname    rname.x  strand.x pos.x    flag.x   NM.x     XA       rname.y 
+ [9] barcode  umi      strand.y pos.y    flag.y   NH       HI       NM.y    
+[17] XS       XN       XT      
+<0 rows> (or 0-length row.names)
+Would I count these under NM <= 2 & HI==1 & flag==[0,16] ?  140 
+#+end_example
+
+**** So... my reads are there. Why are they not in the matrix? Is the BAM file I generated the plot from not the same as the one the matrix comes from?
+
+* Looking at specific reads:
+** ACGTTG :: J00182:75:HTKJNBBXX:2:1223:22577:39981
+  - The read I am searching for is J00182:75:HTKJNBBXX:2:1223:22577:39981 which comes from [[here][most-diff-genes]]
+  - I have 3 bam files from the workflow '"CelSeq2: New Super Workflow #Run8"':
+   1. mine_wd1.star.bam
+   2. mine_wd1.star.featcounts.bam
+   2. mine_wd1.star.featcounts.filt.bam
+ #+BEGIN_SRC bash :results output
+ /home/tetris/miniconda3/bin/samtools view BAM_inputs/mine_wd1.star.bam | grep -H -m 1 J00182:75:HTKJNBBXX:2:1223:22577:39981
+ /home/tetris/miniconda3/bin/samtools view BAM_inputs/mine_wd1.star.featcount.bam | grep -H -m 1 J00182:75:HTKJNBBXX:2:1223:22577:39981
+ /home/tetris/miniconda3/bin/samtools view BAM_inputs/mine_wd1.star.featcount.filt.bam | grep -H -m 1 J00182:75:HTKJNBBXX:2:1223:22577:39981
+ #+END_SRC
+
+ #+RESULTS:
+ : (standard input):J00182:75:HTKJNBBXX:2:1223:22577:39981_ACGTTG_TGTAGG	0	chr8	16076621	255	70M	*	0	0	CTTATACTAAAAAACCCACCTCAGCCCACTCAGCTACTCTAAACAGGAACACACCCAACCAACAATCCCA	A-7A7FJ7FJJJJJFFJJFA-AJ7AAFJF<FJJJFJJAAJJJJJJJAJJJJJJJFFJJJJJJJJJJJJJF	NH:i:1	HI:i:1	AS:i:66	nM:i:1
+ : (standard input):J00182:75:HTKJNBBXX:2:1223:22577:39981_ACGTTG_TGTAGG	0	chr8	16076621	255	70M	*	0	0	CTTATACTAAAAAACCCACCTCAGCCCACTCAGCTACTCTAAACAGGAACACACCCAACCAACAATCCCA	A-7A7FJ7FJJJJJFFJJFA-AJ7AAFJF<FJJJFJJAAJJJJJJJAJJJJJJJFFJJJJJJJJJJJJJF	NH:i:1	HI:i:1	AS:i:66	nM:i:1	XS:Z:Assigned	XN:i:1	XT:Z:ENSDARG00000045639
+ : (standard input):J00182:75:HTKJNBBXX:2:1223:22577:39981_ACGTTG_TGTAGG	0	chr8	16076621	255	70M	*	0	0	CTTATACTAAAAAACCCACCTCAGCCCACTCAGCTACTCTAAACAGGAACACACCCAACCAACAATCCCA	A-7A7FJ7FJJJJJFFJJFA-AJ7AAFJF<FJJJFJJAAJJJJJJJAJJJJJJJFFJJJJJJJJJJJJJF	NH:i:1	HI:i:1	AS:i:66	nM:i:1	XS:Z:Assigned	XN:i:1	XT:Z:ENSDARG00000045639
+
+ #+BEGIN_SRC bash :results output
+ grep -m 1 -H "J00182:75:HTKJNBBXX:2:1223:22577:39981" BAM_inputs/grun.wd1.sam 
+ #+END_SRC
+
+ #+RESULTS:
+ : BAM_inputs/grun.wd1.sam:J00182:75:HTKJNBBXX:2:1223:22577:39981	0	ENSDARG00000045639	2949	37	70M	*	0	0	CTTATACTAAAAAACCCACCTCAGCCCACTCAGCTACTCTAAACAGGAACACACCCAACCAACAATCCCA	A-7A7FJ7FJJJJJFFJJFA-AJ7AAFJF<FJJJFJJAAJJJJJJJAJJJJJJJFFJJJJJJJJJJJJJF	XT:A:U	NM:i:1	X0:i:1	X1:i:0	XM:i:1	XO:i:0	XG:i:0	MD:Z:2A67
+
+ As we can see - the read appears in all three of mine, and also in Grün's for the same gene. This is expected because as we can see from [[most-diff-genes]], I have 116 and Grün has 44.
+
+ Let us now repeat this for a read that I do *not* have and Grün has plenty of.
+
+** ENSDARG00000058327:P1_B1_TGAGGA
+ Here I have 0 and Grün has 134.
+
+*** Find Read in Grün
+    Find the reads (here we will adapt the code blocks from [[extract-reads-for-gene-cell]] and [[flatten-gene-cell]])
+
+#+BEGIN_SRC R :var cell="P1_B1_TGAGGA" :var gene="ENSDARG00000058327" :results output tabular
+   options(stringsAsFactors = FALSE, width=10000)
+   tab <- read.table('2_search_detailed/grun.detailed.tsv', row.names = 1, header=T, stringsAsFactors=FALSE)
+
+   umi.reads <- unlist(strsplit(tab[gene,cell], "\\|"))
+
+   tab2 <- c()
+   res <- lapply(umi.reads, FUN=function(x){
+       umi <- sub("([ACGT]+)_.*","\\1", x)
+       replacer <- paste(umi, "_", sep="")
+       reads <- gsub(replacer,"", x)
+       tab2 <<- rbind(tab2, c(umi,reads))
+   })
+   wanted <- tab2
+   colnames(wanted) <- c("umis", "reads")
+   head(wanted)
+
+   crows <- c()
+   res <- sapply(1:nrow(wanted), FUN=function(x){
+       umis=wanted[,1][[x]]
+       read=unlist(strsplit(wanted[,2][[x]], ";"))
+       crows <<- rbind(crows, cbind(umis, read))
+   })
+   wanted <- data.frame(crows)
+   saveRDS(wanted, file="2_search_detailed/top.ENSDARG00000058327.P1_B1_TGAGGA.rds")
+   head(wanted,20)
+ #+END_SRC
+ 
+#+RESULTS:
+#+begin_example
+      umis     reads                                                                                                               
+ [1,] "GGTGGA" "J00182:75:HTKJNBBXX:2:2123:18233:35936"                                                                            
+ [2,] "CGAATC" "J00182:75:HTKJNBBXX:2:1115:4340:45906"                                                                             
+ [3,] "CGGAGT" "J00182:75:HTKJNBBXX:2:2107:10795:5183;J00182:75:HTKJNBBXX:2:2216:19827:20093;J00182:75:HTKJNBBXX:2:2207:6888:27180"
+ [4,] "AGCTGC" "J00182:75:HTKJNBBXX:2:2218:24109:22942"                                                                            
+ [5,] "GCGTCA" "J00182:75:HTKJNBBXX:2:1104:7019:29694;J00182:75:HTKJNBBXX:2:1122:15493:23909"                                      
+ [6,] "ATTGGG" "J00182:75:HTKJNBBXX:2:2220:19268:42583;J00182:75:HTKJNBBXX:2:2113:4706:26705"                                      
+      umis                                   read
+ 1  GGTGGA J00182:75:HTKJNBBXX:2:2123:18233:35936
+ 2  CGAATC  J00182:75:HTKJNBBXX:2:1115:4340:45906
+ 3  CGGAGT  J00182:75:HTKJNBBXX:2:2107:10795:5183
+ 4  CGGAGT J00182:75:HTKJNBBXX:2:2216:19827:20093
+ 5  CGGAGT  J00182:75:HTKJNBBXX:2:2207:6888:27180
+ 6  AGCTGC J00182:75:HTKJNBBXX:2:2218:24109:22942
+ 7  GCGTCA  J00182:75:HTKJNBBXX:2:1104:7019:29694
+ 8  GCGTCA J00182:75:HTKJNBBXX:2:1122:15493:23909
+ 9  ATTGGG J00182:75:HTKJNBBXX:2:2220:19268:42583
+ 10 ATTGGG  J00182:75:HTKJNBBXX:2:2113:4706:26705
+ 11 CTGCAG J00182:75:HTKJNBBXX:2:1118:18223:16717
+ 12 GTTCAC J00182:75:HTKJNBBXX:2:2201:27438:22837
+ 13 GGATGC  J00182:75:HTKJNBBXX:2:1228:1955:13183
+ 14 GGCGCG J00182:75:HTKJNBBXX:2:2212:11261:30925
+ 15 GCGCAC  J00182:75:HTKJNBBXX:2:2224:18802:2527
+ 16 GCGCAC J00182:75:HTKJNBBXX:2:1226:28026:38732
+ 17 GATTGA J00182:75:HTKJNBBXX:2:2127:29498:16454
+ 18 GATTGA  J00182:75:HTKJNBBXX:2:2207:6989:24472
+ 19 GATTGA J00182:75:HTKJNBBXX:2:2213:17279:11776
+ 20 CACCGG J00182:75:HTKJNBBXX:2:1120:30756:40614
+ #+end_example
+
+*** Inspect Reads
+
+Fns:
+
+#+NAME:grun_has
+#+BEGIN_SRC bash :var rd="None" :results output
+grep -m 1 -H $rd BAM_inputs/grun.wd1.sam 
+#+END_SRC
+
+#+NAME:do_i_have
+#+BEGIN_SRC bash :var rd="None" :results output
+/home/tetris/miniconda3/bin/samtools view BAM_inputs/mine_wd1.star.bam | grep -H -m 1 $rd
+/home/tetris/miniconda3/bin/samtools view BAM_inputs/mine_wd1.star.featcount.bam | grep -H -m 1 $rd
+/home/tetris/miniconda3/bin/samtools view BAM_inputs/mine_wd1.star.featcount.filt.bam | grep -H -m 1 $rd
+echo
+ #+END_SRC
+
+**** CGGAGT :: J00182:75:HTKJNBBXX:2:2107:10795:5183
+***** Does Grün have this read?
+  #+BEGIN_SRC bash :var rd="J00182:75:HTKJNBBXX:2:2107:10795:5183" :results output
+  grep -m 1 -H $rd BAM_inputs/grun.wd1.sam 
+  #+END_SRC
+
+  #+RESULTS:
+  : BAM_inputs/grun.wd1.sam:J00182:75:HTKJNBBXX:2:2107:10795:5183	0	ENSDARG00000058327	1717	0	70M	*	0	0	TGTGTGTGTGTGAGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGAGTGTGTGTGTGTGTGTGTGTGGGTG	A<AFFJJFJJJJ-J7AAFJJFJFJFJ<JJJAFFFFJJJAJJJJJ-AFJJJJJJJJJJJ7A-F7FJJ-FJJ	XT:A:U	NM:i:2	X0:i:1	X1:i:2377	XM:i:2	XO:i:0	XG:i:0	MD:Z:12T31T25
+
+
+ Yes.
+
+***** Do I have these reads?
+
+  #+BEGIN_SRC bash :var rd="J00182:75:HTKJNBBXX:2:2107:10795:5183" :results output
+  /home/tetris/miniconda3/bin/samtools view BAM_inputs/mine_wd1.star.bam | grep -H -m 1 $rd
+  /home/tetris/miniconda3/bin/samtools view BAM_inputs/mine_wd1.star.featcount.bam | grep -H -m 1 $rd
+  /home/tetris/miniconda3/bin/samtools view BAM_inputs/mine_wd1.star.featcount.filt.bam | grep -H -m 1 $rd
+  #+END_SRC
+
+  #+RESULTS:
+  : (standard input):J00182:75:HTKJNBBXX:2:2107:10795:5183_TGAGGA_CGGAGT	0	chr22	37144504	255	66M4S	*	0	0	TGTGTGTGTGTGAGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGAGTGTGTGTGTGTGTGTGTGTGGGTG	A<AFFJJFJJJJ-J7AAFJJFJFJFJ<JJJAFFFFJJJAJJJJJ-AFJJJJJJJJJJJ7A-F7FJJ-FJJ	NH:i:1	HI:i:1	AS:i:64	nM:i:0
+  : (standard input):J00182:75:HTKJNBBXX:2:2107:10795:5183_TGAGGA_CGGAGT	0	chr22	37144504	255	66M4S	*	0	0	TGTGTGTGTGTGAGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGAGTGTGTGTGTGTGTGTGTGTGGGTG	A<AFFJJFJJJJ-J7AAFJJFJFJFJ<JJJAFFFFJJJAJJJJJ-AFJJJJJJJJJJJ7A-F7FJJ-FJJ	NH:i:1	HI:i:1	AS:i:64	nM:i:0	XS:Z:Unassigned_NoFeatures
+  : (standard input):J00182:75:HTKJNBBXX:2:2107:10795:5183_TGAGGA_CGGAGT	0	chr22	37144504	255	66M4S	*	0	0	TGTGTGTGTGTGAGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGAGTGTGTGTGTGTGTGTGTGTGGGTG	A<AFFJJFJJJJ-J7AAFJJFJFJFJ<JJJAFFFFJJJAJJJJJ-AFJJJJJJJJJJJ7A-F7FJJ-FJJ	NH:i:1	HI:i:1	AS:i:64	nM:i:0	XS:Z:Unassigned_NoFeatures
+
+ I do, but it looks like they are assigned 'NoFeatures' because they do not fall into our desired gene ENSDARG00000058327. In fact if we look closerely we can see that these are highly repetitive reads.
+
+  - ENSDARG00000058327 is a chr21 gene, and these reads map to chr22.
+
+***** Verdict?
+  Rejected due to repetitive multi-mapping.
+
+
+
+
+
+**** AGCTGC :: J00182:75:HTKJNBBXX:2:2218:24109:22942
+***** Does Grün have this read?
+
+#+CALL: grun_has(rd="J00182:75:HTKJNBBXX:2:2218:24109:22942")
+
+#+RESULTS:
+: BAM_inputs/grun.wd1.sam:J00182:75:HTKJNBBXX:2:2218:24109:22942	0	ENSDARG00000058327	1720	0	70M	*	0	0	GTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGGGTGTGT	A777A<A<A<A7A<A-<AJ<JJJFJ-FAFAF<F<FFJFJJJ7F<J-A7FAF<JFJ<A-A7--A-7-7-A-	XT:A:R	NM:i:0	X0:i:2	X1:i:2348	XM:i:0	XO:i:0	XG:i:0	MD:Z:70
+Yes
+
+***** Do I have this read?
+
+#+CALL: do_i_have(rd="J00182:75:HTKJNBBXX:2:2218:24109:22942")
+
+#+RESULTS:
+: 
+
+No..
+
+
+**** GGTGGA :: J00182:75:HTKJNBBXX:2:2123:18233:35936
+***** Does Grün have this read?
+#+BEGIN_SRC bash :var rd="J00182:75:HTKJNBBXX:2:2123:18233:35936" :results output
+  grep -m 1 -H $rd BAM_inputs/grun.wd1.sam 
+#+END_SRC
+
+#+RESULTS:
+: BAM_inputs/grun.wd1.sam:J00182:75:HTKJNBBXX:2:2123:18233:35936	0	ENSDARG00000058327	1717	0	70M	*	0	0	TGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGGGTG	-<-7-777-<-F-F-<-<-FAF-F7FAJAFFJJFFJAFFJJFFFFJJJFJJJ<FJJAJJJFJFJ7<---7	XT:A:U	NM:i:0	X0:i:1	X1:i:2359	XM:i:0	XO:i:0	XG:i:0	MD:Z:70
+
+Yes.
+
+***** Do I have this read?
+
+#+BEGIN_SRC bash :var rd="J00182:75:HTKJNBBXX:2:2123:18233:35936" :results output
+/home/tetris/miniconda3/bin/samtools view BAM_inputs/mine_wd1.star.bam | grep -H -m 1 $rd
+/home/tetris/miniconda3/bin/samtools view BAM_inputs/mine_wd1.star.featcount.bam | grep -H -m 1 $rd
+/home/tetris/miniconda3/bin/samtools view BAM_inputs/mine_wd1.star.featcount.filt.bam | grep -H -m 1 $rd
+#+END_SRC
+
+#+RESULTS:
+
+Answer: No. 
+
+***** Why do I not have this read?
+
+At what stage is it being lost?
+
+#+NAME: where_lost
+#+BEGIN_SRC bash :var rd="J00182:75:HTKJNBBXX:2:2123:18233:35936" :results output
+grep -A 3 -H $rd ../inputs/WD_DP_P1_1_forward.fastq   ## input?
+zcat BAM_inputs/mine_wd1.umi_tools_extract.fastq.gz | grep -H -A 3 $rd
+/home/tetris/miniconda3/bin/samtools view BAM_inputs/mine_wd1.star.bam | grep -H -m 1 $rd
+echo
+#+END_SRC
+
+#+RESULTS:
+: ../inputs/WD_DP_P1_1_forward.fastq:@J00182:75:HTKJNBBXX:2:2123:18233:35936 1:N:0:ATCACG
+: ../inputs/WD_DP_P1_1_forward.fastq-GGTGGATGAGGATTTTTTTTTTTTTTTTTT
+: ../inputs/WD_DP_P1_1_forward.fastq-+
+: ../inputs/WD_DP_P1_1_forward.fastq-AAFFFJJJJJJJJFJJJJJJJJJJJJFJJJ
+: (standard input):@J00182:75:HTKJNBBXX:2:2123:18233:35936_TGAGGA_GGTGGA 2:N:0:ATCACG
+: (standard input)-TGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGGGTG
+: (standard input)-+
+: (standard input)--<-7-777-<-F-F-<-<-FAF-F7FAJAFFJJFFJAFFJJFFFFJJJFJJJ<FJJAJJJFJFJ7<---7
+: 
+
+ - It exists in the input FASTQ, and it also exists in the extracted UMI-tools output, but *not* in STAR
+ 
+
+****** What does the STAR mapping log say for that Batch?
+
+#+BEGIN_SRC
+                                 Started job on |	Jul 21 15:44:27
+                             Started mapping on |	Jul 21 15:50:25
+                                    Finished on |	Jul 21 15:51:51
+       Mapping speed, Million of reads per hour |	470.63
+
+                          Number of input reads |	11242859
+                      Average input read length |	70
+                                    UNIQUE READS:
+                   Uniquely mapped reads number |	8044364
+                        Uniquely mapped reads % |	71.55%
+                          Average mapped length |	68.25
+                       Number of splices: Total |	171297
+            Number of splices: Annotated (sjdb) |	83815
+                       Number of splices: GT/AG |	121761
+                       Number of splices: GC/AG |	1709
+                       Number of splices: AT/AC |	812
+               Number of splices: Non-canonical |	47015
+                      Mismatch rate per base, % |	1.95%
+                         Deletion rate per base |	0.06%
+                        Deletion average length |	2.16
+                        Insertion rate per base |	0.05%
+                       Insertion average length |	1.72
+                             MULTI-MAPPING READS:
+        Number of reads mapped to multiple loci |	1192560
+             % of reads mapped to multiple loci |	10.61%
+        Number of reads mapped to too many loci |	247196
+             % of reads mapped to too many loci |	2.20%
+                                  UNMAPPED READS:
+       % of reads unmapped: too many mismatches |	0.00%
+                 % of reads unmapped: too short |	14.19%
+                     % of reads unmapped: other |	1.45%
+                                  CHIMERIC READS:
+                       Number of chimeric reads |	0
+                            % of chimeric reads |	0.00%
+#+END_SRC
+
+We are actually getting some decent mapping statistics for this run, but notice we are losing 14% of our reads because they are 'too short'. 
+
+After consulting this thread (https://github.com/alexdobin/STAR/issues/169) I will attempt to re-run STAR using relaxed filtering parameters in order to retain ALL reads (even, shittily repetitive ones)
+
+**** Re-run of WD_P1_B1 with relaxed STAR params
+(see Workflow: "Repetition of CelSeq2: NSW Run8, with WD1 with relaxed STAR settings")
+
+****** What does the STAR mapping log say for that Batch with relaxed params?
+
+#+BEGIN_SRC 
+                                 Started job on |	Aug 05 16:19:57
+                             Started mapping on |	Aug 05 16:25:39
+                                    Finished on |	Aug 05 16:27:18
+       Mapping speed, Million of reads per hour |	408.83
+
+                          Number of input reads |	11242859
+                      Average input read length |	70
+                                    UNIQUE READS:
+                   Uniquely mapped reads number |	6058391
+                        Uniquely mapped reads % |	53.89%
+                          Average mapped length |	63.79
+                       Number of splices: Total |	205876
+            Number of splices: Annotated (sjdb) |	68422
+                       Number of splices: GT/AG |	79534
+                       Number of splices: GC/AG |	3456
+                       Number of splices: AT/AC |	1567
+               Number of splices: Non-canonical |	121319
+                      Mismatch rate per base, % |	0.00%
+                         Deletion rate per base |	0.07%
+                        Deletion average length |	2.38
+                        Insertion rate per base |	0.06%
+                       Insertion average length |	1.99
+                             MULTI-MAPPING READS:
+        Number of reads mapped to multiple loci |	897489
+             % of reads mapped to multiple loci |	7.98%
+        Number of reads mapped to too many loci |	249400
+             % of reads mapped to too many loci |	2.22%
+                                  UNMAPPED READS:
+       % of reads unmapped: too many mismatches |	3.32%
+                 % of reads unmapped: too short |	31.14%
+                     % of reads unmapped: other |	1.45%
+                                  CHIMERIC READS:
+                       Number of chimeric reads |	0
+                            % of chimeric reads |	0.00%
+#+END_SRC
+
+So now we're seeing 31% unmapped too short! **This is bad**
+
+ - The params we included this time were:
+#+BEGIN_SRC 
+Would you like to set additional output parameters (formatting and filtering)? 	yes 	
+Would you like unmapped reads included in the SAM? 	True 	
+Would you like all alignments with the best score labeled primary? 	False 	
+MAPQ value for unique mappers 	255 	
+Would you like to keep only reads that contain junctions that passed filtering? 	False 	
+Score range below the maximum score for multimapping alignments 	1 	
+Maximum number of alignments to output a read's alignment results, plus 1 	10 	
+Maximum number of mismatches to output an alignment, plus 1 	10 	
+Maximum ratio of mismatches to mapped length 	0.0 	
+Maximum ratio of mismatches to read length 	1.0 	
+Minimum alignment score 	0 	
+Minimum alignment score, normalized to read length 	0.0 	
+Minimum number of matched bases 	0 	
+Minimum number of matched bases, normalized to read length 	0.66
+#+END_SRC
+
+Let's see if we can find our read.
+
+#+BEGIN_SRC bash :var rd="J00182:75:HTKJNBBXX:2:2123:18233:35936" :results output verbatim
+/home/tetris/miniconda3/bin/samtools view BAM_inputs/mine_wd1.star_relaxed.bam | grep $rd
+#+END_SRC
+
+#+RESULTS:
+: J00182:75:HTKJNBBXX:2:2123:18233:35936_TGAGGA_GGTGGA	4	*	0	0	*	*	0	0	TGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGTGGGTG	-<-7-777-<-F-F-<-<-FAF-F7FAJAFFJJFFJAFFJJFFFFJJJFJJJ<FJJAJJJFJFJ7<---7	NH:i:0	HI:i:0	AS:i:0	nM:i:0	uT:A:0
+
+So now we can see that our read is there but it has a flag of value 4, meaning it is unmapped (probably because it is a repetitive read)
+
+
+* How to progress with repetitive reads?
+
+We can look at more examples to discover that they are repetitive reads or better yet we can just feed our BAM file a list of reads to extract and perform a string analysis on all detected sequences.
+
+* String analysis
+
+*** Instead of doing a string analysis on just a subset of reads, we will do it on the whole damn BAM file.
+- This DID NOT WORK, far too long to do a string analysis on all strings.
+- Let us insteads consider a subset of strings, namely those where I have less reads than Grün.    
+
+ 1. All reads where Grün has more reads than me:
+
+#+BEGIN_SRC R :results output
+  options(stringsAsFactors=FALSE)
+  joined <- readRDS('1_merged/joined_mine_grun.rds')
+  better.grun <- joined[order(joined$Mine - joined$Grun),]
+  interest <- (better.grun[(better.grun$Grun > better.grun$Mine * 2) & (better.grun$Grun > 15),])
+  dim(interest)
+  tail(interest)
+
+  interest$Genes <- as.character(interest$Genes)
+  interest$Cells <- as.character(interest$Cells)
+
+  ## Find all reads bisecting these Gene-Cell positions in our detailed Grun matrix.
+  tab <- read.table('2_search_detailed/grun.detailed.tsv', row.names = 1, header=T, stringsAsFactors=FALSE)
+
+  pure.reads <- data.frame(cell=character(), gene=character(), read=character(), stringsAsFactors=F)
+
+  res1 <- lapply(1:nrow(interest), function(row){
+      gene <- interest$Genes[row]
+      cell <- interest$Cells[row]
+
+      reads.grouped.umi <- unlist(strsplit(tab[gene,cell], "\\|"))
+      reads.ungrouped <- unlist(strsplit(reads.grouped.umi, ";"))
+      reads.noumi <- sub("^[A-Z]+_(J.*)", "\\1", reads.ungrouped)
+      pure.reads <<- rbind(pure.reads, cbind(cell,gene,reads.noumi))
+  })
+
+  saveRDS(pure.reads, file="2_search_detailed/reads.grun.gt.mine.rds")
+#+END_SRC
+
+2. Intersect wanted reads with Grün BAM file to get sequences of interest.
+
+    #+NAME: string_analysis
+    #+BEGIN_SRC R :results value output :cache no
+      options(stringsAsFactors=FALSE, width=10000)
+      require(Rsamtools)
+      require(stringr)
+      require(pbapply)
+
+      wanted_barcodes <- data.frame(readRDS('2_search_detailed/reads.grun.gt.mine.rds'))
+
+      bam <- scanBam(
+          'BAM_inputs/grun.wd1.bam',
+          param=ScanBamParam(
+            what=c("qname","seq"),
+      ))[[1]]
+      filt <- bam$qname %in% wanted_barcodes$reads.noumi
+
+      sum(filt)
+      length(wanted_barcodes$reads.noumi)
+      ## We have all the wanted barcodes
+
+      res <- data.frame(qname=bam$qname[filt], seq=bam$seq[filt])
+
+      repeatingSubstrings <- function(string, minlen = 2){
+          #' sliding window approach
+          len <- nchar(string)
+          tmp.start <- 1
+          tmp.elem <- NULL
+
+          tmp.max.elem <- NULL
+          tmp.max.elem.repeats <- 0
+
+          already.done <- data.frame(
+              name=character(),
+              occurences=integer(),
+              score=double(),
+              rank=double()   ## score, but weighs smaller minline higher
+          )
+
+          while(tmp.start + minlen < len){
+              repeater <- substr(string, tmp.start, tmp.start + minlen - 1)
+
+              if (repeater %in% already.done$name){
+                  tmp.start = tmp.start + 1
+                  next
+              }
+              repeater.numoccur <- str_count(string, repeater)
+              #
+              # Factors to consider:
+              # - higher number of occurences should increase score
+              # - small minlen should increase score
+              # repeater.score <- (100 / minlen) * (repeater.numoccur / len)
+              ## - scores max/min = [minlen=2, 50 * 35 / 70 = 25, 50 * 0 / 70]
+              ## - scores max/min = [minlen=5, 20 * 14 / 70 = 4, 20 * 0 ]
+              repeater.score <- 100 * (repeater.numoccur * minlen) / len
+              repeater.rank <- repeater.numoccur / minlen
+              ## Dangerous scoring here, we get a percentage but we can get 100% for minlen = 50 and num occur = 2.
+              ## luckily we do not go beyond 8, but 
+
+              already.done <- rbind(
+                  already.done,
+                  list(
+                      name=repeater,
+                      occurences=repeater.numoccur,
+                      score=repeater.score,
+                      rank=repeater.rank
+                  ),
+                  stringsAsFactors=F
+              )
+
+              if (repeater.numoccur > tmp.max.elem.repeats){
+                  tmp.max.elem.repeats <- repeater.numoccur
+                  tmp.max.elem <- repeater
+              }
+              tmp.start = tmp.start + 1
+          }
+          return(already.done)
+      }
+
+
+      highestRepeatingSubstring <- function(string){
+          lens.to.consider <- c(5,4,3,2)
+          df.all <- data.frame()
+          res1 <- lapply(lens.to.consider, function(len){
+              tmp.level <- repeatingSubstrings(string, len)
+              # filter homology < 50
+              df.all <<- rbind(df.all, tmp.level[tmp.level$score > 50,])
+          })
+          # but sort by rank
+          return(df.all[order(-df.all$rank),])
+      }
+
+      seqRepeatScore <- function(string){
+          df.all <- highestRepeatingSubstring(string)
+          win.row <- df.all[1,]
+          return(win.row)
+      }
+
+
+      scores <- pbsapply(res$seq, seqRepeatScore)
+      colnames(scores) <- NULL
+
+      sco.names <- unlist(scores[c("name"),])
+      sco.occur <- unlist(scores[c("occurences"),])
+      sco.score <- unlist(scores[c("score"),])
+      sco.rank <- unlist(scores[c("rank"),])
+
+      if (is.na(sco.score)){
+          sco.score <- -1
+      }
+
+      res2 <- cbind(res, repeater=sco.names, occurences=sco.occur, scores=sco.score)
+
+      saveRDS(res2, file="string_analysis.whole.rds")
+      write.table(res2[,c("qname","scores")], file="string_analysis.twocol.csv", sep="\t", quote=F, row.names=F)
+    #+END_SRC
+
+3. Replace all readnames in the detailed matrix, with the scores given by the string_analysis
+
+
+#+NAME: weighted_mean_scoring
+#+BEGIN_SRC R :results output
+  options(stringsAsFactors=F)
+  require(pbapply)
+  require(stringr)
+  require(dplyr)
+
+  qmap <- read.table('string_analysis.twocol.csv', sep='\t', row.names = 1, header=T)
+  tab <- read.table('2_search_detailed/grun.detailed.tsv', row.names = 1, header=T)
+
+  ##tab[tab == "."] <- 0  # set all dots to 0
+
+  new.mat <- pbapply(tab, 1:2, function(x){
+      if (x == "."){
+          return(-1)
+      }
+
+      ## x is a set of reads seperated by '|' and ';' and then umi
+      ## x <- tab["ENSDARG00000000394","P1_B1_GTACTC"]
+      ## tab["ENSDARG00000000068","P1_B1_TGGTGA"] → NaN
+
+      reads.grouped.umi <- unlist(strsplit(x, "\\|"))
+      reads.ungrouped <- unlist(strsplit(reads.grouped.umi, ";"))
+      umis.reads <- data.frame(str_split_fixed(reads.ungrouped, "_", 2))
+
+                                          # Intersect
+      reads.noumi <- umis.reads[,2]
+      new.scores <- qmap[reads.noumi,]
+      umis.reads <- cbind(umis.reads, new.scores)
+
+      ## collapse all scores from the same UMI as a weighted average of each
+      ## group
+      means.by.umis <- umis.reads %>%
+          group_by(X1) %>%
+          summarize(Mean = mean(new.scores, na.rm = T))
+
+      means.by.umis$Mean[is.nan(means.by.umis$Mean)] <- NA
+
+      ## Simple average of all umis
+      mean.overall <- mean(means.by.umis$Mean, na.rm = T)
+      if (is.na(mean.overall)){
+          return(NA)                    ## No reads at all from this gene/cell were selected for string analysis
+      }
+      if (is.numeric(mean.overall)){
+         return(mean.overall)           ## 1 or more reads from this gene/cell were selected for string analysis
+      }
+      return(-1)                        ## Not sure what this means.... TODO - see how many -1 we see in our new.mat
+  })
+
+  saveRDS(new.mat, file="new.mat")
+#+END_SRC
+
+4. Pull the row and column names from each non-zero cell.
+
+#+BEGIN_SRC R :results output
+  options(stringsAsFactors = F)
+  require(ggplot2)
+  require(reshape2)
+
+  colormatrix <- readRDS("new.mat")
+  single.col <- melt(colormatrix, varnames=c("Genes", "Cells"))
+  ## Here we have percentages per Cell/Gene:
+  ## 3 main types of values:
+  ##   * -1 where no reads were given in the detailed matrix
+  ##   * NA where reads were given, but they were of no interest to us
+  ##   * \d where reads were given, and they were of interest to us and we have a score
+
+  # These NA reads were in the string analysis but were below thresh
+  single.col$value[is.na(single.col$value)] <- -5
+
+
+  joined.mine.grun <- readRDS('1_merged/joined_mine_grun.rds')
+  ## And here are the comparative counts between my matrix and grün's.
+
+  joined <- merge(
+      joined.mine.grun,
+      single.col,
+      by=c("Genes", "Cells")
+  )
+  ## Now let's join the scores with the counts
+
+  ## Here we have 3 scoring systems:
+  ##  : -1 reads with no counts → not plotted
+  ##  : -5 means were seen in string analysis but below thresh → black, set to NA for colouring
+  ##  : *  is the percentage of repeats above > 50% blue → red
+  ##joined$value[joined$value == -5] <- NA
+  saveRDS(joined, file="1_merged/joined_mine_grun.with_scores.rds")
+
+
+#+END_SRC
+
+#+RESULTS:
+
+And plot!
+
+#+BEGIN_SRC R :results output graphics :file plot.full.png
+  library(ggplot2)
+  joined <- readRDS('1_merged/joined_mine_grun.with_scores.rds') 
+  p1 <- ggplot(joined, aes(x=Mine, y=Grun)) + 
+        geom_point(data = joined, alpha=0.5, color="black")
+
+  p2 <- p1 + 
+        geom_point(data = joined[joined$value > 0,], alpha=0.2, aes(color=value)) +
+        scale_color_gradient(low="blue", high="red")
+
+  p2 + labs(color="% Repetitive")
+#+END_SRC
+
+#+RESULTS: full_color_plot
+[[file:plot.full.png]]
+
+#+BEGIN_SRC R :results output graphics :file plot.lim50.png
+  library(ggplot2)
+  joined <- readRDS('1_merged/joined_mine_grun.with_scores.rds') 
+  p1 <- ggplot(joined, aes(x=Mine, y=Grun)) + 
+        geom_point(data = joined, alpha=0.5, color="black")
+
+  p2 <- p1 + 
+        geom_point(data = joined[joined$value > 0,], alpha=0.2, aes(color=value)) +
+        scale_color_gradient(low="blue", high="red")
+
+  p2 + labs(color="% Repetitive") + xlim(0,50) + ylim(0,50) 
+#+END_SRC
+
+#+RESULTS:
+[[file:plot.lim50.png]]
+
+* Other
+
+#+BEGIN_SRC python :results out
+bars = ['A','C','T','G']
+barlen = 3
+edit = 2
+
+tmp_last = None
+
+for a in range(barlen):
+    tmp_bar = []
+    for b in bars:
+        tmp_bar.append(b)
+
+
+
+
+#+END_SRC
+
+
